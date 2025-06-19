@@ -1,0 +1,7 @@
+# Archivos de entorno y credenciales
+.env
+firebase-credentials.json
+
+# Carpeta de entorno virtual de Python (si usas una)
+/BOT_TEL/
+__pycache__/
