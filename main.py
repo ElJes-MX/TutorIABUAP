@@ -18,6 +18,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FIREBASE_APP_ID = os.getenv("FIREBASE_APP_ID")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # Se usará solo en el servidor
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -72,34 +73,24 @@ El cuaderno busca que el estudiante comprenda y aplique el concepto de derivada 
     - Descripción de máximos y mínimos: Un máximo relativo ocurre si la función cambia de creciente a decreciente. Un mínimo, si cambia de decreciente a creciente.
 """
 
-# Teclado reutilizable para volver al menú
 MAIN_MENU_KEYBOARD = InlineKeyboardMarkup([[
     InlineKeyboardButton("« Volver al Menú Principal", callback_data="main_menu")
 ]])
 
 # --- 3. FUNCIONES AUXILIARES ---
-
 async def call_gemini_api(prompt: str, is_structured: bool = False, schema: dict = None) -> str | dict | None:
-    """Llama a la API de Gemini de forma asíncrona."""
     if not GEMINI_API_KEY:
         logger.error("No se encontró la clave de API de Gemini.")
         return "Error: La conexión con la IA no está configurada."
-
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    
     payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
     if is_structured and schema:
-        payload["generationConfig"] = {
-            "responseMimeType": "application/json",
-            "responseSchema": schema
-        }
-
+        payload["generationConfig"] = {"responseMimeType": "application/json", "responseSchema": schema}
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(api_url, json=payload, timeout=60.0)
             response.raise_for_status()
             result = response.json()
-
         if text_content := result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text"):
             return json.loads(text_content) if is_structured else text_content
         else:
@@ -113,52 +104,37 @@ async def call_gemini_api(prompt: str, is_structured: bool = False, schema: dict
         return "Hubo un problema conectando con la IA. Inténtalo de nuevo."
 
 async def get_user_state(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> dict:
-    """Obtiene el estado de la conversación de un usuario."""
     if not db: 
         if not context.user_data:
             context.user_data.update({"bot_state": "idle", "last_asesoria_topic": None, "current_exercise": None})
         return context.user_data
-
     doc_ref = db.collection("user_states").document(str(user_id))
     doc = doc_ref.get()
     if doc.exists:
         return doc.to_dict()
-    
     return {"bot_state": "idle", "last_asesoria_topic": None, "current_exercise": None}
 
 async def set_user_state(user_id: int, state: dict, context: ContextTypes.DEFAULT_TYPE):
-    """Guarda el estado de la conversación de un usuario."""
     if not db:
         context.user_data.update(state)
         return
-
     doc_ref = db.collection("user_states").document(str(user_id))
     doc_ref.set(state)
 
 async def save_interaction(user_id: int, interaction_type: str, data: dict):
-    """Guarda una interacción en una subcolección del usuario."""
     if not db or not FIREBASE_APP_ID: return
-    
     collection_path = f"artifacts/{FIREBASE_APP_ID}/users/{user_id}/bot_interactions"
     interactions_collection = db.collection(collection_path)
-    
-    interaction_data = {
-        "type": interaction_type, "userId": user_id, "timestamp": firestore.SERVER_TIMESTAMP, **data
-    }
+    interaction_data = {"type": interaction_type, "userId": user_id, "timestamp": firestore.SERVER_TIMESTAMP, **data}
     interactions_collection.add(interaction_data)
     logger.info(f"Interacción '{interaction_type}' guardada para el usuario {user_id}")
 
 async def send_long_message(message_or_query, text: str):
-    """
-    Divide un mensaje largo en trozos y los envía por separado como texto plano.
-    """
     MAX_LENGTH = 4096
     reply_method = message_or_query.message.reply_text if hasattr(message_or_query, 'message') else message_or_query.reply_text
-
     if len(text) <= MAX_LENGTH:
         await reply_method(text)
         return
-
     parts = []
     current_part = ""
     for line in text.split('\n'):
@@ -168,25 +144,17 @@ async def send_long_message(message_or_query, text: str):
         else:
             current_part += '\n' + line
     parts.append(current_part)
-
     for part in parts:
         if part.strip():
             await reply_method(part.strip())
 
 async def generate_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict):
-    """
-    Función refactorizada para generar un ejercicio.
-    Recibe el estado actual para evitar inconsistencias.
-    """
     topic = state['current_exercise']['topic']
     difficulty = state['current_exercise']['difficulty']
-
     schema = {"type": "OBJECT", "properties": {"problem": {"type": "STRING"}, "solution": {"type": "STRING"}}}
     prompt = f"Crea un ejercicio de Cálculo Diferencial sobre '{topic}' con dificultad {difficulty}/5. Devuelve JSON con claves 'problem' y 'solution'. Usa texto plano."
-    
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     exercise_data = await call_gemini_api(prompt, is_structured=True, schema=schema)
-    
     if exercise_data and "problem" in exercise_data:
         state["bot_state"] = "waiting_for_exercise_answer"
         state["current_exercise"].update(exercise_data)
@@ -194,17 +162,13 @@ async def generate_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     else:
         await update.effective_message.reply_text("No pude generar un ejercicio. Inténtalo de nuevo con /prueba.")
         state["bot_state"] = "idle"
-    
     await set_user_state(update.effective_user.id, state, context)
 
 
 # --- 4. MANEJADORES DE COMANDOS ---
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador para el comando /start. Resetea el estado del usuario."""
     user = update.effective_user
     await set_user_state(user.id, {"bot_state": "idle", "last_asesoria_topic": None, "current_exercise": None}, context)
-    
     welcome_text = (
         "¡Hola! Soy tu compañero de estudio para Cálculo Diferencial. Tengo las siguientes funciones:\n\n"
         "📚 `/asesoria`: Dudas específicas sobre temas.\n"
@@ -217,30 +181,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text)
 
 async def asesoria_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el flujo de /asesoria."""
     state = await get_user_state(update.effective_user.id, context)
     state["bot_state"] = "waiting_for_doubt"
     await set_user_state(update.effective_user.id, state, context)
     await update.message.reply_text("Por favor, dime tu duda y el nivel de dificultad. \nEj: '¿Qué es la derivada? nivel Fácil'")
 
 async def ejemplo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el flujo de /ejemplo."""
     state = await get_user_state(update.effective_user.id, context)
     state["bot_state"] = "waiting_for_example_topic"
     await set_user_state(update.effective_user.id, state, context)
     await update.message.reply_text("¡Claro! ¿Sobre qué tema de Cálculo Diferencial te gustaría un ejemplo?")
 
 async def prueba_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el flujo de /prueba."""
     state = await get_user_state(update.effective_user.id, context)
     state["bot_state"] = "waiting_for_exercise_topic"
     await set_user_state(update.effective_user.id, state, context)
-    
     keyboard = [[InlineKeyboardButton(topic, callback_data=f"topic_{topic}")] for topic in EXERCISE_TOPICS]
     await update.message.reply_text("¡Excelente! Elige el tema:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def dudas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el flujo de ayuda para el cuaderno de trabajo basado en IA."""
     state = await get_user_state(update.effective_user.id, context)
     state["bot_state"] = "waiting_for_duda_cuaderno"
     await set_user_state(update.effective_user.id, state, context)
@@ -250,22 +209,18 @@ async def dudas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def encuesta_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía el link a la encuesta."""
     await update.message.reply_text(
         "¡Gracias por ayudarme a mejorar! Tu opinión es muy valiosa.\n\n"
         "Por favor, completa la siguiente encuesta:\nhttps://forms.gle/dtyB5o2FncCA7zMy7"
     )
     await save_interaction(update.effective_user.id, 'encuesta_link_sent', {'link': 'https://forms.gle/dtyB5o2FncCA7zMy7'})
 
-# --- 5. MANEJADOR DE MENSAJES DE TEXTO (MÁQUINA DE ESTADOS) ---
-
+# --- 5. MANEJADOR DE MENSAJES DE TEXTO ---
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa mensajes de texto según el estado actual del usuario."""
     user_id = update.effective_user.id
     text = update.message.text
     state = await get_user_state(user_id, context)
     bot_state = state.get("bot_state", "idle")
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
 
     if bot_state == "waiting_for_duda_cuaderno":
@@ -281,12 +236,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             doubt, difficulty = match.groups()
             difficulty_map = {'fácil': 'básico', 'intermedio': 'detallado', 'avanzado': 'experto'}
             prompt = f'Eres un tutor experto en Cálculo Diferencial. Explica: "{doubt.strip()}". Nivel: {difficulty_map[difficulty.lower()]}. Usa texto plano (ej: x^2).'
-            
             bot_response = await call_gemini_api(prompt)
             await send_long_message(update.message, bot_response)
-            
             await save_interaction(user_id, 'asesoria', {'query': doubt, 'difficulty': difficulty, 'response': bot_response})
-            
             state.update({"bot_state": "waiting_for_deepen_topic", "last_asesoria_topic": doubt})
             keyboard = [[InlineKeyboardButton("No, gracias", callback_data="deepen_no")]]
             await update.message.reply_text("¿Quieres profundizar en algo más?", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -298,7 +250,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         bot_response = await call_gemini_api(prompt)
         await send_long_message(update.message, bot_response)
         await save_interaction(user_id, 'profundizar_asesoria', {'original': state.get("last_asesoria_topic"), 'deepen': text.strip(), 'response': bot_response})
-        
         keyboard = [[InlineKeyboardButton("No, gracias", callback_data="deepen_no")]]
         await update.message.reply_text("¿Quieres profundizar en algo más?", reply_markup=InlineKeyboardMarkup(keyboard))
         
@@ -317,12 +268,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         - Solución Correcta: "{exercise.get('solution')}"
         - Respuesta del Estudiante: "{text.strip()}"
         Si es correcta, felicita y ASEGÚRATE de incluir la palabra "correcto". Si no, da una pista SIN revelar la solución. Usa texto plano."""
-        
         verification = await call_gemini_api(prompt)
         await send_long_message(update.message, verification)
-        
         await save_interaction(user_id, 'verificacion_ejercicio', {**exercise, 'user_answer': text.strip(), 'verification': verification})
-
         positive_keywords = ['correcto', 'exacto', 'perfecto', 'muy bien', 'excelente', 'felicidades']
         if any(keyword in verification.lower() for keyword in positive_keywords):
             keyboard = [[InlineKeyboardButton("Otro ejercicio similar", callback_data="next_action_similar")], [InlineKeyboardButton("Regresar al menú principal", callback_data="main_menu")]]
@@ -335,15 +283,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await set_user_state(user_id, state, context)
 
-# --- 6. MANEJADOR DE CLICS EN BOTONES (CALLBACK QUERIES) ---
+# --- 6. MANEJADOR DE CLICS EN BOTONES ---
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los clics en los botones inline."""
     query = update.callback_query
     await query.answer()
-    
     user_id = query.from_user.id
     state = await get_user_state(user_id, context)
-    
     action = query.data
 
     if action.startswith("topic_"):
@@ -379,7 +324,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
 # --- 7. MANEJADOR DE ERRORES ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Registra los errores causados por las actualizaciones."""
     logger.error("Excepción al manejar una actualización:", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
@@ -389,32 +333,39 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- 8. FUNCIÓN PRINCIPAL ---
 def main():
-    """Configura y ejecuta el bot."""
+    """Configura y ejecuta el bot, adaptándose al entorno."""
     if not TELEGRAM_TOKEN:
         logger.critical("No se encontró el TELEGRAM_TOKEN. El bot no puede iniciar.")
         return
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Registra los manejadores de comandos
+    # Registra todos los manejadores
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("asesoria", asesoria_command))
     application.add_handler(CommandHandler("ejemplo", ejemplo_command))
     application.add_handler(CommandHandler("prueba", prueba_command))
     application.add_handler(CommandHandler("dudas", dudas_command)) 
     application.add_handler(CommandHandler("encuesta", encuesta_command))
-    
-    # Registra el manejador de clics en botones
     application.add_handler(CallbackQueryHandler(handle_callback_query))
-    
-    # Registra el manejador de mensajes de texto (debe ir después de los botones)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    
-    # Registra el manejador de errores global
     application.add_error_handler(error_handler)
 
-    logger.info("Iniciando bot...")
-    application.run_polling(drop_pending_updates=True)
+    # Elige el modo de ejecución basado en el entorno
+    if WEBHOOK_URL:
+        # Modo Webhook (para el servidor de Render)
+        port = int(os.environ.get("PORT", 8443))
+        logger.info(f"Iniciando bot en modo WEBHOOK en el puerto {port}...")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TELEGRAM_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+        )
+    else:
+        # Modo Polling (para pruebas locales)
+        logger.warning("No se encontró WEBHOOK_URL. Iniciando bot en modo POLLING para pruebas locales.")
+        application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
