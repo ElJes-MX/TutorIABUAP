@@ -366,6 +366,6 @@ def main():
         # Modo Polling (para pruebas locales)
         logger.warning("No se encontró WEBHOOK_URL. Iniciando bot en modo POLLING para pruebas locales.")
         application.run_polling(drop_pending_updates=True)
-
+#agregar comentario
 if __name__ == "__main__":
     main()
